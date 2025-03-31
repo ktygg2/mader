@@ -23,6 +23,8 @@ from geometry_msgs.msg import Point
 
 from std_msgs.msg import ColorRGBA
 
+from mader_msgs.msg import DynTraj
+
 import numpy as np
 from numpy import linalg as LA
 import random
@@ -34,7 +36,8 @@ import tf
 
 from math import sin, cos, tan
 
-
+import csv
+import os
 import copy 
 import sys
 
@@ -47,19 +50,20 @@ class MovingForest:
         self.total_num_obs=total_num_obs;
         self.num_of_dyn_objects=int(0.5*total_num_obs) #int(0.65*total_num_obs);
         self.num_of_stat_objects=total_num_obs-self.num_of_dyn_objects; 
-        self.x_min= -6
-        self.x_max= 6.0
-        self.y_min= -6.0 
-        self.y_max= 6.0
-        self.z_min= 1.0 #-6.0 for sphere sim
-        self.z_max= 1.0  #6.0 for sphere sim
-        self.scale=1.0;
-        self.slower_min=1.2
-        self.slower_max= 1.2
-        self.bbox_dynamic=[0.6, 0.6, 0.6] 
-        self.bbox_static_vert=[0.4, 0.4, 4]  #[0.4, 0.4, 6] for sphere sim
-        self.bbox_static_horiz=[0.4, 4, 0.4]
-        self.percentage_vert=1.0;  #0.5 for sphere sim
+        self.x_min= -10     #장애물 배치 범위 조정
+        self.x_max= 10.0    #장애물 배치 범위 조정
+        self.y_min= -10.0   #장애물 배치 범위 조정
+        self.y_max= 10.0    #장애물 배치 범위 조정
+        self.z_min= 1.0     # 최소 z 위치 #-6.0 for sphere sim 
+        self.z_max= 1.0     # 최대 z 위치 #6.0 for sphere sim
+        self.scale=1.0
+        self.slower_min= 1.2  #장애물 이동 속도 조정
+        self.slower_max= 1.2 #장애물 이동 속도 조정
+        self.bbox_dynamic=[0.6, 0.6, 0.6]    #장애물 크기 조정 (동적)
+        self.bbox_static_vert=[0.4, 0.4, 4]  #장애물 크기 조정 (세로형 정적) #[0.4, 0.4, 6] for sphere sim
+        self.bbox_static_horiz=[0.4, 4, 0.4] #장애물 크기 조정 (가로형 정적)
+        self.bbox_cylinder = [0.5, 0.5, 2]  # 장애물 크기 조정 (원기둥)
+        self.percentage_vert=0.5;  #0.5 for sphere sim #전체 정적 장애물 중 세로형 장애물의 비율
 
 
 
@@ -72,14 +76,22 @@ class FakeSim:
         self.name = name[1:-1]
 
        #self.num_of_objects = 0;
-
-
         self.world=MovingForest(total_num_obs)
    
         available_meshes_static=["package://mader/meshes/ConcreteDamage01b/model3.dae", "package://mader/meshes/ConcreteDamage01b/model2.dae"]
         available_meshes_dynamic=["package://mader/meshes/ConcreteDamage01b/model4.dae"]
         # available_meshes=["package://mader/meshes/ConcreteDamage01b/model3.dae"]
 
+        self.pubTraj = rospy.Publisher('/trajs', DynTraj, queue_size=self.world.total_num_obs)
+        self.pubShapes_static = rospy.Publisher('/shapes_static', Marker, queue_size=1, latch=True)
+        self.pubShapes_static_mesh = rospy.Publisher('/shapes_static_mesh', MarkerArray, queue_size=1, latch=True)
+        self.pubShapes_dynamic_mesh = rospy.Publisher('/shapes_dynamic_mesh', MarkerArray, queue_size=1, latch=True)
+        self.pubShapes_dynamic = rospy.Publisher('/shapes_dynamic', Marker, queue_size=1, latch=True)
+
+        # CSV 파일 경로
+        csv_file_path = os.path.expanduser('~/Downloads/forest1.csv')
+        self.csv_data = self.read_csv_file(csv_file_path)
+        
         self.x_all=[];
         self.y_all=[];
         self.z_all=[];
@@ -88,52 +100,38 @@ class FakeSim:
         self.meshes=[];
         self.type=[];#"dynamic" or "static"
         self.bboxes=[]; 
-        for i in range(self.world.num_of_dyn_objects):          
-            self.x_all.append(random.uniform(self.world.x_min, self.world.x_max));
-            self.y_all.append(random.uniform(self.world.y_min, self.world.y_max));
-            self.z_all.append(random.uniform(self.world.z_min, self.world.z_max));
-            self.offset_all.append(random.uniform(-2*math.pi, 2*math.pi));
-            self.slower.append(random.uniform(self.world.slower_min, self.world.slower_max));
-            self.type.append("dynamic")
-            self.meshes.append(random.choice(available_meshes_dynamic));
-            self.bboxes.append(self.world.bbox_dynamic);
+        # CSV 데이터를 활용하여 장애물 설정
+        for i, row in enumerate(self.csv_data):
+            x, y, z = float(row[0]), float(row[1]), float(row[2])
+            width, height, depth = float(row[3]), float(row[4]), float(row[5])
 
-        for i in range(self.world.num_of_stat_objects):
-            bbox_i=[]; 
-            if(i<self.world.percentage_vert*self.world.num_of_stat_objects):
-                bbox_i=self.world.bbox_static_vert;
-                self.z_all.append(bbox_i[2]/2.0); #random.uniform(self.world.z_min, self.world.z_max)  for sphere sim
-                self.type.append("static_vert")
-                self.meshes.append(random.choice(available_meshes_static));
+            # 장애물 위치 추가
+            self.x_all.append(x)
+            self.y_all.append(y)
+            self.z_all.append(z)
+
+            # 장애물 크기 추가
+            self.bboxes.append([width, height, depth])
+
+            # 동적 또는 정적 장애물 타입 설정 (예: 절반은 동적)
+            if i < self.world.num_of_dyn_objects:
+                self.type.append("dynamic")
+                self.meshes.append(random.choice(available_meshes_dynamic))
+                self.offset_all.append(random.uniform(-2 * math.pi, 2 * math.pi))
+                self.slower.append(random.uniform(self.world.slower_min, self.world.slower_max))
             else:
-                bbox_i=self.world.bbox_static_horiz;
-                self.z_all.append(random.uniform(0.0, 3.0));  #-3.0, 3.0 for sphere sim
-                self.type.append("static_horiz")#They are actually dynamic (moving in z) //TODO (change name)
-                self.meshes.append(random.choice(available_meshes_dynamic));
+                static_type = random.choice(["static_vert", "static_cylinder", "static_horiz"])
+                self.type.append(static_type)
+                self.meshes.append(random.choice(available_meshes_static))
 
-
-            self.x_all.append(random.uniform(self.world.x_min-self.world.scale, self.world.x_max+self.world.scale));
-            self.y_all.append(random.uniform(self.world.y_min-self.world.scale, self.world.y_max+self.world.scale));
-            
-            self.offset_all.append(random.uniform(-2*math.pi, 2*math.pi));
-            self.slower.append(random.uniform(self.world.slower_min, self.world.slower_max));
-            # self.type.append("static")
-            
-            self.bboxes.append(bbox_i)
-
-
-
-
-        self.pubTraj = rospy.Publisher('/trajs', DynTraj, queue_size=self.world.total_num_obs)#If queue_size=1, pubTraj will not be able to keep up (due to the loop in pubTF)#, latch=True
-        self.pubShapes_static = rospy.Publisher('/shapes_static', Marker, queue_size=1, latch=True)
-        self.pubShapes_static_mesh = rospy.Publisher('/shapes_static_mesh', MarkerArray, queue_size=1, latch=True)
-        self.pubShapes_dynamic_mesh = rospy.Publisher('/shapes_dynamic_mesh', MarkerArray, queue_size=1, latch=True)
-        self.pubShapes_dynamic = rospy.Publisher('/shapes_dynamic', Marker, queue_size=1, latch=True)
-        self.pubGazeboState = rospy.Publisher('/gazebo/set_model_state', ModelState, queue_size=1)
-
-        self.already_published_static_shapes=False;
-
-        rospy.sleep(0.5)
+    def read_csv_file(self, file_path):
+        """CSV 파일을 읽어 데이터를 반환"""
+        data = []
+        with open(file_path, 'r') as file:
+            csv_reader = csv.reader(file)
+            for row in csv_reader:
+                data.append(row)
+        return data
 
 
     def pubTF(self, timer):
@@ -161,7 +159,7 @@ class FakeSim:
         marker_array_static_mesh=MarkerArray();
         marker_array_dynamic_mesh=MarkerArray();
 
-        for i in range(self.world.num_of_dyn_objects + self.world.num_of_stat_objects):
+        for i in range(len(self.bboxes)):
             t_ros=rospy.Time.now()
             t=rospy.get_time(); #Same as before, but it's float
 
@@ -169,24 +167,33 @@ class FakeSim:
 
             bbox_i=self.bboxes[i];
             s=self.world.scale;
-            if(self.type[i]=="dynamic"):
-
-              [x_string, y_string, z_string] = self.trefoil(self.x_all[i], self.y_all[i], self.z_all[i], s,s,s, self.offset_all[i], self.slower[i]) 
-              # print("self.bboxes[i]= ", self.bboxes[i])
-              dynamic_trajectory_msg.bbox = bbox_i;
-              marker_dynamic.scale.x=bbox_i[0]
-              marker_dynamic.scale.y=bbox_i[1]
-              marker_dynamic.scale.z=bbox_i[2]
-            else:
-              # [x_string, y_string, z_string] = self.static(self.x_all[i], self.y_all[i], self.z_all[i]);
-              dynamic_trajectory_msg.bbox = bbox_i;
-              marker_static.scale.x=bbox_i[0]
-              marker_static.scale.y=bbox_i[1]
-              marker_static.scale.z=bbox_i[2]
-              if(self.type[i]=="static_vert"):
+            print("Length of self.bboxes:", len(self.bboxes))
+            if self.type[i] == "dynamic":
+                [x_string, y_string, z_string] = self.trefoil(self.x_all[i], self.y_all[i], self.z_all[i], s, s, s, self.offset_all[i], self.slower[i])
+                marker_dynamic.scale.x = bbox_i[0]
+                marker_dynamic.scale.y = bbox_i[1]
+                marker_dynamic.scale.z = bbox_i[2]
+            elif self.type[i] == "static_vert" or self.type[i] == "static_horiz":
                 [x_string, y_string, z_string] = self.static(self.x_all[i], self.y_all[i], self.z_all[i])
-              else:
-                [x_string, y_string, z_string] = self.wave_in_z(self.x_all[i], self.y_all[i], self.z_all[i], 2.0, self.offset_all[i], 1.0)
+                marker_static.scale.x = bbox_i[0]
+                marker_static.scale.y = bbox_i[1]
+                marker_static.scale.z = bbox_i[2]
+            elif self.type[i] == "static_cylinder":
+                [x_string, y_string, z_string] = self.static(self.x_all[i], self.y_all[i], self.z_all[i])
+                marker = Marker()
+                marker.id = i + 1000
+                marker.ns = "cylinder"
+                marker.header.frame_id = "world"
+                marker.type = marker.CYLINDER
+                marker.action = marker.ADD
+                marker.pose.position.x = eval(x_string)
+                marker.pose.position.y = eval(y_string)
+                marker.pose.position.z = eval(z_string)
+                marker.scale.x = bbox_i[0]  # 반지름
+                marker.scale.y = bbox_i[0]  # 반지름
+                marker.scale.z = bbox_i[2]  # 높이
+                marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
+                marker_array_static_mesh.markers.append(marker)
 
 
 
@@ -274,7 +281,10 @@ class FakeSim:
         self.pubShapes_static.publish(marker_static)
 
         # self.already_published_static_shapes=True;
-
+        self.pubShapes_static = rospy.Publisher('/shapes_static', Marker, queue_size=1, latch=True)
+        self.pubShapes_static_mesh = rospy.Publisher('/shapes_static_mesh', MarkerArray, queue_size=1, latch=True)
+        self.pubShapes_dynamic_mesh = rospy.Publisher('/shapes_dynamic_mesh', MarkerArray, queue_size=1, latch=True)
+        self.pubShapes_dynamic = rospy.Publisher('/shapes_dynamic', Marker, queue_size=1, latch=True)
 
 
     def static(self,x,y,z):
@@ -283,7 +293,7 @@ class FakeSim:
     # Trefoil knot, https://en.wikipedia.org/wiki/Trefoil_knot
     def trefoil(self,x,y,z,scale_x, scale_y, scale_z, offset, slower):
 
-        #slower=1.0; #The higher, the slower the obstacles move" 
+        #slower=1.0; #The higher, the slower the obstacles move" #offset을 조정하면 각 장애물의 시작 위치를 다르게 설정 가능
         tt='t/' + str(slower)+'+';
 
         x_string=str(scale_x)+'*(sin('+tt +str(offset)+') + 2 * sin(2 * '+tt +str(offset)+'))' +'+' + str(x); #'2*sin(t)' 
@@ -296,7 +306,7 @@ class FakeSim:
 
         return [x_string, y_string, z_string]
 
-    def wave_in_z(self,x,y,z,scale, offset, slower):
+    def wave_in_z(self,x,y,z,scale, offset, slower): #scale 값을 키우면 장애물의 움직이는 높이 범위가 증가
 
         tt='t/' + str(slower)+'+';
 
@@ -307,7 +317,7 @@ class FakeSim:
         return [x_string, y_string, z_string]
 
 
-             
+
 
 def startNode(total_num_obs):
     c = FakeSim(total_num_obs)
@@ -328,7 +338,7 @@ if __name__ == '__main__':
     #     total_num_obs=int(sys.argv[1])
 
     # print("sys.argv[1]= ", sys.argv[1])
-    total_num_obs=50 #70 for sphere sim
+    total_num_obs=40 #70 for sphere sim
     ns = rospy.get_namespace()
     try:
         rospy.init_node('dynamic_obstacles')
